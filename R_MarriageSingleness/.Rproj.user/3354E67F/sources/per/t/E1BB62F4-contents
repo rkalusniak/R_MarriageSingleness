@@ -1,0 +1,273 @@
+---
+title: "Predicting Marital Status - Cleaning Data"
+author: "Rachel Kalusniak"
+date: "2023-04-24"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load libraries}
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(stringr)
+library(skimr)
+```
+
+## Accessing the Data
+
+Accessing the data for this project was more complicated that I originally expected. The initial download of data I accessed was more than 7GB and crashed both my Rstudio and excel. I eventually had to redownload Rstudio to clear the output. 
+![7,116,434KB size of orignal data file](Data/Images/originaldatasize.png)
+
+I then found [NSLY Investigator](https://www.nlsinfo.org/investigator), which allowed me to select just the variables I wanted out of the about 60,000 available in the study. In my selection, I focused on factors I hypothesized could impact marital status, including education, income, family background, and health. Most of the data is in wide format, with each response year getting its own variable. I selected more variables knowing that I could filter more during the data processing as I needed.
+
+When I opened CSV file for the Investigator site, I was originally very overwhelmed. The data lacked understandable variable names, and missing values needed to be recoded from negative numbers to `NA`. I briefly considered finding a new cleaner data set with this setback.
+![Picture of original data without variable names or labels](Data/Images/rawdataCSV.png)
+
+Instead, I did a bit more investigation and discovered that the Investigator site will provide an R-script file to convert the negative numbers to `NA` and rename the variables. The script also can change all the variables to categorical factors, if desired. I decided to do the factor conversion separately because I wanted to keep some variables like income and marriage date continuous so I could do further manipulations. The only change I had to make to the Rscript files was adding a line at the end to save the output as an RDS file that I could then read into this document to read and manipulate. 
+
+
+## Cleaning the Data
+
+Much of this project embodies the idea that '80% of a data scientist time is spent just getting a clean data set. I organized by data cleaning by topic, so I could easily track my progress. Since all my manipulations were on the original data set, this structure also prevented needing to rerun all the cleaning steps every time.
+
+My first step is to read in the RDS files created in the Rscripts mentioned above.
+
+Through the data cleaning process I realized I only had the individual's current marital status. This can account for individuals that never marry, but it doesn't account for marriage failures. If an individual gets divorced and remarries it will not reflect here. Therefore, I found another variable that details the status of subject's first marriage. The data set includes an ID variable, so it is simple to join the data files into a single set.
+
+Given that I started with 200 variables, I had to create a list of notes, so I could track the variables I already cleaned and the variables I still wanted to manipulate. Therefore, I wrote the variables names to a csv file and re-saved it as [mynotes.xlsx](Data/mynotes.xlsx), so I could use this file for tracking without the script accidentally overwriting it. 
+```{r read_RDS}
+#Read in data files
+nlsy97 <- readRDS('Data/new_data.Rds')
+divorce <- readRDS('Data/divorce.Rds')
+
+#Add ending of first marriage to data
+nlsy97 <- nlsy97 %>% 
+  inner_join(select(divorce, PUBID_1997, CVC_FIRST_MARRY_END_XRND), by = 'PUBID_1997')
+
+#Create export of variable names
+#write.csv(names(nlsy97), file = "data/varnames.csv")
+
+#Clean environment by removing divorce data 
+rm(divorce)
+```
+
+
+### ID Variables
+I started the data cleaning by looking at the five ID variables for sex, race/ethnicity, birth date, and sample type.This data set over samples certain populations and  uses weights to adjust to the demographics on the United States. For the sake of simplicity, I did not consider the weights in this analysis. However, this could be an area for future research
+
+Another necessary simplification was creating birth dates. The data only provides the year and month of the subjects birth for their anonymity. To compute a birth date for later age variables, I assume everyone was born on the first of the month. The variation is age from this assumption is minimal
+
+I also simplfy variable names and drop any variables that are not longer necessary.
+```{r id_vars}
+nlsy97 <- nlsy97 %>% 
+  rename(RACE = KEY_RACE_ETHNICITY_1997) %>% 
+  mutate(BDAY = as.Date(paste(KEY_BDATE_Y_1997, '-', KEY_BDATE_M_1997, '-01', sep = '')),
+         FEMALE = as.factor(if_else(KEY_SEX_1997 == 2, 1, 0))) %>% # Create bianary as factor
+  select(-starts_with('KEY'), -CV_SAMPLE_TYPE_1997)
+
+#Labels for race factor variable
+RACE_ETH <- c('black', 'hispanic', 'mixed-race', 'non-black & non-hispanic')
+
+#Function to convert a variable to a factor and add labels
+  #Also used later in the education section 
+factorlevels <- function(df, variable, label) {
+  df[[variable]] <- factor(df[[variable]], levels = sort(unique(df[[variable]])), labels = label)
+  df
+}
+
+#Convert race to factor and add labels
+nlsy97 <- factorlevels(nlsy97, 'RACE', RACE_ETH)
+  
+```
+
+
+### Income Variables
+The income section is the first time I encounter the issue of the wide time-series data. The surveyor's slightly changed the  question's wording over the 20+ year span, so there are different variables names. For this project, I do not care about how the participants income changed overtime. I am looking at if poverty or wealth affects their decision to marry. At the beginning of the survey participants were 12 to 16 years old. Therefore, I decided to target the time-series variables in 1997, 2008, and 2019. These years will examine they household income as a teenager, young adult, and middle aged. This method might give a slight advantage to older survey participants because they have more years of experience. A more complex analysis could examine income at a specific age or at the time of marriage.
+
+```{r income_vars}
+nlsy97 <- nlsy97 %>% 
+  #Simplify variable names
+  rename(INCOME_1997 =  CV_INCOME_GROSS_YR_1997,
+         INCOME_2008 = CV_INCOME_FAMILY_2008,
+         INCOME_2019 = CV_INCOME_FAMILY_2019) %>% 
+  #Drop all other income variables
+  select(-starts_with('CV_INCOME')) 
+         
+
+
+```
+
+
+### Family Variables
+I also wanted consider family structure. I hypothesize that individuals with both parents present or a larger family are more likely to get and stay married. `CV_YTH_REL_HH_AGE_12_1997` is a factor variables that describes the subjects household structure. I convert it into a binary variable representing if the survey participant has both parents at home. I originally thought income source represented who is the household was working, but it actually is 
+```{r family_vars}
+nlsy97 <- nlsy97 %>% 
+  rename(HHSIZE_1998 = CV_HH_SIZE_1998) %>% 
+  mutate(BOTHPARENTS_1997 = as.factor(if_else(CV_YTH_REL_HH_AGE_12_1997 == 1, 1, 0))) %>% 
+  #Drop variables no longer required
+  select(-CV_HH_INCOME_SOURCE_1997, -CV_YTH_REL_HH_AGE_12_1997)
+
+```
+
+### Health Variables
+Next, I considered variables relating to the participants health. The hypothesis is partners will be more attached to subjects that are healthy or confident in their own body. Therefore, these individuals are more likely to get and stay married. There are three factor variables related to health: overall health, perception of weight, and desired change in weight. The survey stops collection the weight perception and desired change in 2011, so it is not available for the most recent data. I chose to focus on the individuals age as a young adult in 2008 because most participants probably reached their maximum height at this age.
+```{r health_vars}
+nlsy97 <- nlsy97 %>% 
+  #Rename variables for easier understanding
+  rename(HEALTH_1997 = 'YHEA-100_1997',
+         HEALTH_2008 = 'YHEA-100_2008',
+         HEALTH_2019 = 'YHEA-100_2019',
+         WEIGHT_1997 = 'YHEA-2200_1997',
+         WEIGHT_2008 = 'YSAQ-000B_2008',
+         WEIGHT_2019 = 'YHEA-SAQ-000B_2019',
+         WEIGHTPRECEP_1997 = 'YSAQ-373_1997',
+         WEIGHTPRECEP_2008 = 'YSAQ-373_2008',
+         WEIGHTCHANGE_1997 = 'YSAQ-374_1997',
+         WEIGHTCHANGE_2008 = 'YSAQ-374_2008',
+         HEIGHTFT_2008 = 'YSAQ-000A000001_2008',
+         HEIGHTINONLY_2008 = 'YSAQ-000A000002_2008') %>%
+  #Convert to total height in inches
+  mutate(HEIGHTIN_2008 = HEIGHTINONLY_2008 + HEIGHTFT_2008 * 12) %>% 
+  #Drop extra variables
+  select(-starts_with('Y'), -HEIGHTFT_2008, -HEIGHTINONLY_2008, -'PC9-001_1997')
+
+#Adding labels
+HEALTH <- c('excellent', 'very good', 'good', 'fair', 'poor')
+WEIGHTPRECEP <- c('very under', 'slightly under', 'about right', 'slightly over', 'very over')
+WEIGHTCHANGE <- c('lose', 'gain', 'stay same', 'nothing')
+
+
+for (i in 1:7) {
+  health_labels <- c('HEALTH', 'WEIGHTPRECEP', 'WEIGHTCHANGE')
+  years <- c('1997', '2008', '2019')
+  health_varslist <- as.vector(outer(health_labels, years, paste, sep = '_'))
+  nlsy97 <- factorlevels(nlsy97, health_varslist[i], eval(parse(text = rep(health_labels, 3)[i])))
+}
+
+  
+```
+
+
+### Education Variables
+I then wanted to look a academic achievement. I hypothesize that partners find intelligence attractive, so those with higher test scores or degrees are more likely to get and stay married.
+
+I originally wanted to consider ACT and SAT score and transcript results as measures of intelligence. However, I found that the only about one-fourth of survey participants took the test and the transcript structure made it difficult to work with. Instead, the set provides the percentile ASVAB scores for most of the subjects. 
+
+The interactions between my hypothesis and degree level is unclear in the research. [This article](https://www.pewresearch.org/short-reads/2015/12/04/education-and-marriage/) from the Pew Research Center shows  that educated women are more likely to stay in lasting marriages. However, other sources show education increases the probability that individuals never marry. 
+
+The data provides degree achievement by showing the month completed counting from January 1980. if the individual never achieved the degree, the variable shows `NA`. However, I want to look at degree status as a binary variable for this study. The date of completion does not matter. Therefore, I created a function to recode the degrees to a binary value and simplify the variable name. According to the code book, there are less  than 200 invalid skips for these variable. This detail was lost in the original Rscript files. However, I believe the simplification that these individuals do not have a degree is fair.
+```{r edu_vars}
+nlsy97 <- nlsy97 %>%
+  #Simplify variable names
+  rename(ASVAB = ASVAB_MATH_VERBAL_SCORE_PCT_1999,
+         GRADESREPEAT = CVC_GRADES_REPEAT_EVER_2007_XRND,
+         GRADESSKIP = CVC_GRADE_SKIPPED_EVER_2007_XRND,
+         HIGHGRADE = CVC_HGC_EVER_XRND)
+
+#Manipulate degree variables  
+MakeBinary <- function(df, variable){
+  #Convert to binary
+  df[[variable]][df[[variable]] >= 0] <- 1
+  df[[variable]][is.na(df[[variable]])] <- 0
+  #Change to factor
+  df[[variable]] <- as.factor(df[[variable]])
+  #Simplify variable name
+  new_var_name <- strsplit(variable, '_')[[1]][2]
+  rename(df, setNames(variable, new_var_name))
+  }
+  
+#Create a list of education degree variables of interest
+edu_varlist <- c('CVC_GED_XRND', 'CVC_HS_DIPLOMA_XRND', 'CVC_AA_DEGREE_XRND', 'CVC_BA_DEGREE_XRND',
+                 'CVC_PROF_DEGREE_XRND', 'CVC_PHD_DEGREE_XRND', 'CVC_MA_DEGREE_XRND')
+
+#Perform conversion
+for (i in 1:7) {
+  nlsy97 <- MakeBinary(nlsy97, edu_varlist[i])
+}
+
+#Drop extra variables
+nlsy97 <-  nlsy97 %>% 
+  select(-matches(c('ACT', 'SAT', 'DEGREE')), -starts_with(c('TRAN', 'PSTRAN', 'CVC_HS')),
+         -CVC_SCH_ATTEND_EVER_XRND)
+
+```
+
+### Work Variables
+Then, I wanted to consider if an individuals work status. The hypothesis in workaholics and people without jobs are less likely to marry because they are not attractive to partners. This indicator may need to be squared in the model.
+```{r work_vars}
+nlsy97 <- nlsy97 %>%
+  rename(WKSWK_ADULT = CVC_WKSWK_ADULT2_ALL_XRND) %>% 
+  select(-matches(c('CVC_WKSWK', 'JOB')))
+
+```
+
+### Marriage Variables
+
+Finally, I came  to the  target variables about the subjects marital status. The data provides the subject's marriage date as the months since January 1980. I used the assumption that all months are 31.4167 (365/12) days to calculate the date of first marriage and cohabitation. The cohabitation date presents and issue. If the subjects gets married before living with anyone then gets divorced and lives with someone else, the date is misleading. Therefore, I have to manipulate it twice to turn any secondary cohabitation to `NA`. Marriage and cohabitation date then can translate to ages. The manipulation assumes that everyone who doesn't report a cohabitation date or marriage date never lived with a partner. This is a slight simplification because there are 224 invalid skips according to the code book, but that detail was last in the Rscript files.There were two people that showed they never married but had a  marriage date. I chaged the never married formula, so it cannot show an individual never married if a marriage date exists.
+
+This provides two possible hypotheses to test. First, people who cohabitation before marriage are less likely to get married. Secondly, people who life together are more likely to get married.
+```{r marry_vars}
+nlsy97 <- nlsy97 %>%
+  
+  mutate(
+         #Compute date of first marriage and cohabitation
+         MARRYDATE = ymd(19800101) + CVC_FIRST_MARRY_MONTH_XRND * 365/12,
+         COHABDATE = ymd(19800101) + CVC_FIRST_COHAB_MONTH_XRND * 365/12,
+         
+         #Age of first marriage and first cohabitation. Age of cohabitation is only valid if before first marriage
+         MARRYAGE = time_length(difftime(MARRYDATE, BDAY), "years"), 
+         COHABAGE = if_else(COHABDATE > MARRYDATE & !is.na(MARRYDATE), NA, time_length(difftime(COHABDATE, BDAY), "years")),
+         
+         #Binary for if cohabitation before their first marriage
+         COHAB_PREMARRY = case_when(MARRYDATE > 0 & is.na(COHABDATE) ~ 0,
+                                    COHABDATE < MARRYDATE & !is.na(COHABDATE) & !is.na(MARRYDATE) ~ 1,
+                                    COHABDATE > MARRYDATE & !is.na(COHABDATE) & !is.na(MARRYDATE) ~ 0,
+                                    COHABDATE > 0 & is.na(MARRYDATE) ~ 1,
+                                    .default = 0),
+         
+         #Binary for if their first marriage fails 
+          #Show 1 if marriage ends in divorce
+          #Show 0 if the marriage end in death of the spouse, annulment, or doesn't not end
+          FAILMARRY = case_when(
+           CVC_FIRST_MARRY_END_XRND == 1 & MARRYDATE > 0 ~ 1,
+           (CVC_FIRST_MARRY_END_XRND != 1 | is.na(CVC_FIRST_MARRY_END_XRND))  & MARRYDATE > 0 ~ 0),
+         
+         #Binary for individuals that never married
+         NEVERMARRY = case_when(CV_MARSTAT_COLLAPSED_2019 == 0 & is.na(MARRYAGE)  ~ 1,
+                                CV_MARSTAT_COLLAPSED_2019 > 0  ~ 0)) %>%
+  
+  #Turn new binary variables into factors
+  mutate(across(c(NEVERMARRY, COHAB_PREMARRY, FAILMARRY), factor)) %>% 
+  
+  #Drop row the have problematic marriage data
+  filter(is.na(MAR_IMPUTE_FIRST_MARRY_XRND)) %>%
+  
+  #Drop extra variables
+  select(-starts_with(c('CV', 'MAR_IMPUTE')), -COHABDATE, -MARRYDATE)
+
+```
+
+
+
+## Summary
+
+That is a lot of data cleaning. The data frame when from 200 to just 36 variables. Let's look at a quick summary of the data before we move on to data cleaning and modeling.
+```{r data_summary}
+str(nlsy97)
+skim(nlsy97)
+```
+I am writing the data to a RDS file to use in the next markdown document.
+```{r write_RDS}
+saveRDS(nlsy97, 'Data/clean_nlsy97.Rds')
+
+```
+
+## Next File
+**You can access the next markdown file [here](FinalProject_EDA.html)**

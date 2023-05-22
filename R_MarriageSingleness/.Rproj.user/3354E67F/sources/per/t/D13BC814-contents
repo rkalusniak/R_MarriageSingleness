@@ -1,0 +1,313 @@
+---
+title: "Predicting Marital Status - Exploratory Data Analysis"
+author: "Rachel Kalusniak"
+date: "2023-04-24"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Below are the libraries you want to install for this project. `ggh4x` is a new package I discovered on [this Stack Overflow post](https://stackoverflow.com/questions/3685285/ggplot2-facet-grid-free-scales). This extension of ggplot2 allows for additional axis manipulation on faceted plots. Please be careful installing this. It created an issue with my device, and I had to reinstall `rlang` and `ggplot2`, in that order.
+```{r load_libraries}
+library(dplyr)
+library(skimr)
+library(tidyr)
+library(ggplot2)
+#install.packages('ggh4x')
+library(ggh4x)
+library(RColorBrewer)
+library(scales)
+library(corrplot)
+
+```
+
+
+
+## Getting Started
+Let's load the data cleaned in the [previous markdown file.](FinalProject_DataCleaning.html)
+```{r load_data}
+nlsy97 <- readRDS('Data/clean_nlsy97.Rds')
+
+```
+
+In the previous file, I checked the overall set-up of the  data with the `skim()` package. I now want to look more closely to see what insights are available.
+```{r overall_data}
+skim(nlsy97)
+
+```
+
+Looking at the yearly data, an increasing number of missing values in 2008 and even more in 2019. This indicates that more participants are dropping out the the survey as time passes. This is expected, but it should not prevent model building. The 2019 income values and marriage failure indicator have the lowest completion rate. Marriage failure only applies to subset of the population that ever got married, so its actual completion rate likely is much higher. 
+
+There are some interesting insights in the categorical variables. At a glance, the individuals in excellent or very good health decreased overtime. I do not see any obvious trends in the subject's weight goals at this zoomed out level, but the proportion of subjects that feel their weight is "about right" decreased significantly between the subject's teen years and mid-20s. This speaks to a body dismorphia issue for other research. The number of subjects that achieve a degree decreases as the degree level increases. This makes logical sense, but it may mean that higher levels of academic achievement may have limited use for modeling because they don't have enough representation.
+
+The numeric variables also indicate some points of interest and data questions. The average household size is 4.4 people. This is slightly higher than the United State's fertility rate when the subjects were born in 1980, according to [this World Bank Source](https://data.worldbank.org/indicator/SP.DYN.TFRT.IN?locations=US). This likely indicates some household extend beyond the nuclear family. Less than 25 percent of subjects skip or repeat a grade. The lack of representation and completion in this information likely means it will note be helpful for modeling. I originally discovered I had a very short set of subjects or calculated the height incorrectly, so I went back to the data cleaning file to fix that. The data shows the average cohabitation age is 22.4, while the average age of first marriage is 26.0. The marriage statistics is slightly lower than the US population as discussed below, but this group is only 34 to 38 years old, so there can be individuals that marry later drawing this average up. 
+
+
+
+## Overall Target Variables
+```{r overall_target_pct}
+g_overall <- nlsy97 %>%
+  select(NEVERMARRY, FAILMARRY) %>% 
+  pivot_longer(c(NEVERMARRY, FAILMARRY), names_to = 'VARIABLE', values_to = 'VALUE') %>% 
+  group_by(VARIABLE) %>% 
+  summarize(count = sum(!is.na(VALUE)),
+            YES = mean(as.numeric(as.character(VALUE)), na.rm = TRUE)) %>% 
+  mutate(NO = 1 - YES)
+
+nm_true_overall <- g_overall[2, 'YES']
+div_true_overall <- g_overall[1, 'YES']
+
+g_overall
+
+g_overall %>% 
+  select(-count) %>% 
+  pivot_longer(c('YES', 'NO'), names_to = 'YN', values_to = "pct") %>% 
+  ggplot(aes(x = VARIABLE, y = pct, fill = YN)) +
+  geom_col(position = 'dodge') +
+  scale_y_continuous(labels = percent) +
+  scale_x_discrete(labels = c('Divorced','Never Married')) +
+  labs(y = 'Percentage', x = 'Target Variable') +
+  ggtitle('Percentage of Subjects that Never Married or Got Divorced') +
+  theme(plot.title = element_text(hjust = 0.5, size = 16)) +
+  theme(legend.title=element_blank())
+
+```
+
+The table above shows presents an interesting picture on the population. Only 29.4% of subjects ever got divorced. This is much lower than adage people like to say that *"50% of marriages end in divorce."* That 50% mark actually is too high because it count failures after the first marriage. Additionally, trends show that the divorce rate is decreasing. This 29% statistic also is lower than the population because the youngest participants were only 34 years old during the last survey in 2019. For lack of a better phrase, they still have plenty of time to get divorced. A surprisingly large 39.8% of participants have not married by age 34 to 38. According to [this graph](https://www.census.gov/content/dam/Census/library/visualizations/time-series/demo/families-and-households/ms-2.pdf) from the Census Bureau, the median age of first marriage is 28 for women and 30 for men.The unmarried participants in this survey are above the mean, but not by a dramatic amount.
+
+
+
+## Annual Variables
+I want to examine the annual variables that are available for multiple years to see how they work as predictors for never married and divorced. These variables break into two groups: the numeric and the factors. I use faceted plots to get a bids eye view on the data, but this does lose some detail. 
+
+
+### Numeric Variables
+The numeric annual variables are income and weight.
+```{r numeric_yearly}
+#Select numeric yearly variables and convert to long format for wrapping 
+nlsy97_int_long <- nlsy97 %>% 
+  select(starts_with(c('INCOME', 'WEIGHT_')), NEVERMARRY, FAILMARRY) %>% 
+  pivot_longer(cols = starts_with(c('INCOME', 'WEIGHT_')),
+               names_to = 'VARIABLE',
+               values_to = 'VALUE') %>% 
+  separate(VARIABLE, into = c('TYPE', 'YEAR'), sep = '_', remove = FALSE) %>% 
+  mutate(YEAR = as.factor(YEAR))
+
+
+#Create a facet grip of violin plots
+## Never Married
+nlsy97_int_long %>% 
+  filter(!is.na(NEVERMARRY)) %>% 
+  ggplot() +
+  geom_violin(aes(x = NEVERMARRY, y = VALUE, fill = NEVERMARRY)) +
+  facet_grid2(TYPE~YEAR, scales = 'free_y', independent = 'none') +
+  scale_x_discrete(labels = c('Married','Never Married')) +
+  scale_fill_discrete(labels = c('Married','Never Married')) +
+  theme(legend.title = element_blank()) +
+  labs(x = 'Did the subject ever get married?', y = 'Income (USD) or Weight (lbs)') +
+  ggtitle('Weight and Income of Subjects by Never Married Status') +
+  theme(plot.title = element_text(hjust = 0.5, size = 16))
+
+
+
+## Failed First Marriage
+nlsy97_int_long %>% 
+  filter(!is.na(FAILMARRY)) %>% 
+  ggplot() +
+  geom_violin(aes(x = FAILMARRY, y = VALUE, fill = FAILMARRY)) +
+  facet_grid2(TYPE~YEAR, scales = 'free_y', independent = 'none') +
+  scale_x_discrete(labels = c('Not Divorced', 'Divorced')) +
+  scale_fill_discrete(labels = c('Not Divorced', 'Divorced')) +
+  theme(legend.title = element_blank()) +
+  labs(x = 'If the subject was married, did their first marriage end in divorce?',
+       y = 'Income (USD) or Weight (lbs)') +
+  ggtitle('Weight and Income of Subjects by Status of First Marriage') +
+  theme(plot.title = element_text(hjust = 0.5, size = 16))
+
+#Floor negative income values
+nlsy97$INCOME_1997[nlsy97$INCOME_1997 < 0 & !is.na(nlsy97$INCOME_1997)] <- 0
+
+
+```
+
+These graphs don't show a significant different between the target variables. The income is highly right skewed as expected. There is a small triangle at the top of the violin plots because the research team puts a ceiling on the data for the purpose of anonymity. There are some negative income values in 1997 that need to be floored at 0, to log transform the  data. It appears that married and divorced subjects have slightly higher incomes in 2019. It makes sense that married subject have a higher household income because there could be multiple people contributing a salary. This idea also explains why people that are not divorced have higher salaries. The graphs do show that the average subject's weight is increasing, but there is no discernible difference between the target variables.
+
+
+### Factor Variables
+Now let's look at the factor variables for different years. This includes the subject's perception of their health and weight and their desire to change their weight. As a reminder, the weight factor variables are not available for 2019. I had to rotate the data this way to show the differences in the target variable. Like above, this is a bird's eye view.
+
+The default fill colors were too similar and made the graph harder to read. Therefore, I found [this blog post](https://www.r-bloggers.com/2013/09/how-to-expand-color-palette-with-ggplot-and-rcolorbrewer/), which shows how to increase the size of a Brewer's palette to fit the graph's requirements.The color's aren't pretty, in my opinion, but they are distinct.
+``` {r factor_yearly}
+nlsy97_fct_long <- nlsy97 %>% 
+  select(starts_with(c('HEALTH', 'WEIGHTCHANGE', 'WEIGHTPRECEP')), NEVERMARRY, FAILMARRY) %>% 
+  pivot_longer(cols = starts_with(c('HEALTH', 'WEIGHTCHANGE', 'WEIGHTPRECEP')),
+               names_to = 'VARIABLE',
+               values_to = 'VALUE') %>% 
+  separate(VARIABLE, into = c('TYPE', 'YEAR'), sep = '_', remove = FALSE) %>% 
+  mutate(YEAR = as.factor(YEAR))
+
+#Create color palette function
+colourCount <- length(unique(nlsy97_fct_long$VALUE))
+getPalette <- colorRampPalette(brewer.pal(8, "Dark2"))
+
+
+#Never Married
+nlsy97_fct_long %>% 
+  filter(!is.na(NEVERMARRY) & !is.na(VALUE)) %>% 
+  ggplot(aes(fill = VALUE, y = NEVERMARRY)) +
+  geom_bar(position = 'fill') +
+  facet_grid2(TYPE~YEAR, scales = 'free_y') +
+  scale_fill_manual(values = getPalette(colourCount), name = "Subject's Response") +
+  scale_y_discrete(labels = c('Married','Never Married')) +
+  scale_x_continuous(labels = percent) +
+  labs(x = 'Percentage', y = "Did the subject ever get married?") +
+  ggtitle("Subject's Percetion of Their Health by Never Married Status") +
+  theme(plot.title = element_text(hjust = 0.5, size = 14),
+        axis.text.x = element_text(angle = 90, vjust = 0.5))
+
+#Failed Marriage
+nlsy97_fct_long %>% 
+  filter(!is.na(FAILMARRY) & !is.na(VALUE)) %>% 
+  ggplot(aes(fill = VALUE, y = FAILMARRY)) +
+  geom_bar(position = 'fill') +
+  facet_grid2(TYPE~YEAR, scales = 'free_y') +
+  scale_fill_manual(values = getPalette(colourCount), name = "Subject's Response") +
+  scale_y_discrete(labels = c('Not Divorced','Divorced')) +
+  scale_x_continuous(labels = percent) +
+  labs(x = 'Percentage', y = "If the subject was married, did their first marriage end in divorce?") +
+  ggtitle("Subject's Percetion of Their Health by Status of First Marriage") +
+  theme(plot.title = element_text(hjust = 0.5, size = 14),
+        axis.text.x = element_text(angle = 90, vjust = 0.5))
+        
+
+
+
+```
+
+The graph shows some interesting insights between the target variables. People that never married or got divorced have a more pessimistic opinion of their health. Subjects that never got married or their first marriage ended in divorce are more likely to say their health is not "excellent" or "very good." Those that never got married also are more likely to want to change their weight, mostly due to individuals that want to gain weight. However, in their mid-20s, subjects that married before 2019 were more likely to say they are over weight. For the divorce factor, there is no discernible difference between the subjects reported weight goals or perception. This paints a mixed picture but seems to indicate `HEALTH` is the best predictor amount these variables.
+
+
+
+## Statistics
+Let's take a quick look at some more statistics for subjects who never married or their first marriage ended in divorce.
+
+
+### Numeric Variables
+```{r num_sum_stats}
+
+nlsy97_num_long2 <- nlsy97 %>% 
+  
+  #Select factor variables not previously examined
+  select(HHSIZE_1998, HEIGHTIN_2008, ASVAB, GRADESREPEAT, GRADESSKIP, HIGHGRADE, WKSWK_ADULT, MARRYAGE, COHABAGE, NEVERMARRY, FAILMARRY) %>%
+
+  #Pivot variables to column
+  pivot_longer(cols = -c(NEVERMARRY, FAILMARRY),
+               names_to = 'VARIABLE',
+               values_to = 'VALUE')
+  
+#Find the mean values for each variable of interest 
+(varmeans <- nlsy97_num_long2 %>% 
+  group_by(VARIABLE) %>% 
+  summarize(overall_mean = mean(VALUE, na.rm = TRUE)))
+  
+
+#Find means by target variable category and compute difference
+nlsy97_num_long2 %>% 
+  
+  #Pivot marital status to column
+  pivot_longer(cols = c(NEVERMARRY, FAILMARRY),
+               names_to = 'MARRYSTAT',
+               values_to = 'MARRYVALUE') %>%
+  
+  #Add  the  means to the long data set
+  left_join(varmeans, by = 'VARIABLE') %>% 
+  
+  #Group By
+  group_by(MARRYSTAT, MARRYVALUE, VARIABLE, overall_mean) %>%
+
+  #Filter out NA
+  filter(!is.na(VALUE) & !is.na(MARRYVALUE)) %>%
+
+  #Find count and mean by the target variable groups
+  summarize(count = n(),
+            group_mean = mean(as.numeric(as.character(VALUE)), na.rm = TRUE)) %>%
+
+  #Find the percent difference from the overall sort by the largest percent difference
+  mutate(pct_diff = (group_mean/overall_mean) - 1) %>% 
+  arrange(desc(abs(pct_diff)))
+           
+
+```
+
+This shows some very surprising results. Those that get divorced skip more grades; this seems go against the other academic achievement indicators. However, the expected pattern holds for grades repeated. Those that never marry or get divorced repeat more grades on average. The ASVAB test percentile holds with the trends for academic achievement. Those that don't get divorced see the ASVAB percentile 15.4% higher than the overall group, while those that never get married have scores 14.1% lower than the overall sample. The average marriage age for subjects that get divorced is 10.3% lower than the overall for the population. Interestingly, there is no significant difference in height for the mean groups.
+
+
+### Factor Variables
+```{r fct_sum_stats}
+nlsy97 %>% 
+  
+  #Select factor variables not previously examined
+  select(RACE, FEMALE, BOTHPARENTS_1997, GED, HS, AA, BA, PROF, MA, COHAB_PREMARRY, NEVERMARRY, FAILMARRY) %>%
+  
+  #Pivot variables to column
+  pivot_longer(cols = -c(NEVERMARRY, FAILMARRY),
+               names_to = 'VARIABLE',
+               values_to = 'VALUE') %>% 
+  
+  #Pivot marital status to column
+  pivot_longer(cols = c(NEVERMARRY, FAILMARRY),
+               names_to = 'MARRYSTAT',
+               values_to = 'MARRYVALUE') %>% 
+  
+  #Group By
+  group_by(MARRYSTAT, VARIABLE, VALUE) %>%
+  
+  #Filter out NA
+  filter(!is.na(VALUE) & !is.na(MARRYVALUE)) %>% 
+  
+  #Find count and pct true for  the target variable
+  summarize(count = sum(as.numeric(as.character(MARRYVALUE))),
+            pct_true = mean(as.numeric(as.character(MARRYVALUE)), na.rm = TRUE)) %>% 
+  
+  #Find the difference from the overall percent true and sort by the largest absolute difference
+  mutate(diff = case_when(MARRYSTAT == 'FAILMARRY' ~ pct_true - as.numeric(div_true_overall),
+                          MARRYSTAT == 'NEVERMARRY' ~ pct_true - as.numeric(nm_true_overall)),
+         absdiff = abs(diff)) %>% 
+  arrange(desc(absdiff))
+           
+
+```
+
+The data shows some interesting insights. First, I found some issues in my variable noting of the subject lived a partner before they got married, so I had to spend time back in the data cleaning file correcting that issue. The largest difference is by race. Back subjects are 20 points more likely to never marry than the population average. Those with professional and Master's degrees are more likely to marry and less likely to get divorces than the sample's average. Those with a GED or without a high school diploma get divorced at a rate 12 points high than the overall sample. Those with a Bachelor's degree are more likely to get married, while those without a high school degree are less likely to do the same. This data disproves my hypothesis that those with more education are less likely to get married. Instead, it shows that those with more education get and stay married. The stratification by race also is unexpected. 
+
+
+
+## Getting Ready to Model
+Logistic regression assumes that each column in independent. Therefore, we need to test for multicolinearity before proceeding with modeling. This can be done visually for the numeric variables using a correlation plot.
+```{r income_vars}
+cormatrix <- cor(select_if(nlsy97[,2:36], is.numeric), use = 'complete.obs')
+
+cormatrix
+
+corrplot(cormatrix)  
+
+```
+
+The plot shows that the weight variables have a high degree of correlation. That is expected, but it may mean the model can only use one year. Marriage age and cohabitation age are  the only other variable with a moderate degree of correlation. These variables should be watched when modeling.
+
+
+
+## Next File
+**Let's save the data file with any changes and move to the next and final [markdown document](FinalProject_Models.html).**
+```{r save_data}
+saveRDS(nlsy97, 'Data/clean2_nlsy97.Rds')
+
+```
+
+
+

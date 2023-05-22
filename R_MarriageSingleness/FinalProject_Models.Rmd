@@ -1,0 +1,409 @@
+---
+title: "Predicting Marital Status - Modeling Data"
+author: "Rachel Kalusniak"
+date: "2023-04-24"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r load_libraries}
+library(dplyr)
+library(caret)
+library(stringi)
+```
+
+
+
+## Load and Partition Data
+First, let's load the clean data from the [previous markdown file](FinalProject_EDA.Rmd).
+```{r load_data}
+nlsy97 <- readRDS('Data/clean2_nlsy97.Rds')
+```
+
+Now we need to split the data into test and training sets, so we can build and test the models. I want to avoid `NA` values in my target values for the modeling sets, so I filtered those out before using `createDataPartion()` to split the data. As you can see from the table below, this helps ensure there is roughly an equal proportion of ones and zeros of the target variable.
+```{r partition_data}
+set.seed(8842)
+
+#Create the never married training and test set
+nevermarry <- nlsy97 %>% 
+  filter(!is.na(NEVERMARRY))
+
+nevermarry_index <- createDataPartition(nevermarry$NEVERMARRY, list = FALSE, p = 0.8, times = 1)
+
+nevermarry_train <- nevermarry[nevermarry_index,]
+nevermarry_test <- nevermarry[-nevermarry_index,]
+
+df<- data.frame(targetvariable = 'NEVERMARRY',
+                original = mean(as.numeric(as.character(nlsy97$NEVERMARRY)), na.rm = TRUE),
+                train = mean(as.numeric(as.character(nevermarry_train$NEVERMARRY)), na.rm = TRUE),
+                test = mean(as.numeric(as.character(nevermarry_test$NEVERMARRY)), na.rm = TRUE))
+
+#Create the divorced training and test set
+divorce <- nlsy97 %>% 
+  filter(!is.na(FAILMARRY))
+
+divorce_index <- createDataPartition(divorce$FAILMARRY, list = FALSE, p = 0.8, times = 1)
+
+divorce_train <- divorce[divorce_index,]
+divorce_test <- divorce[-divorce_index,]
+
+rbind(df, data.frame(targetvariable = 'FAILMARRY',
+                original = mean(as.numeric(as.character(nlsy97$FAILMARRY)), na.rm = TRUE),
+                train = mean(as.numeric(as.character(divorce_train$FAILMARRY)), na.rm = TRUE),
+                test = mean(as.numeric(as.character(divorce_test$FAILMARRY)), na.rm = TRUE)))
+
+
+
+rm(nevermarry, divorce, df)
+
+
+```
+
+
+
+## Never Married
+
+
+### Null Model
+Now that we have the data set up let's create the null model.
+```{r marry_null}
+#Create null vectors
+nevermarry_train_null <- rep(0, nrow(nevermarry_train))
+nevermarry_test_null <- rep(0, nrow(nevermarry_test))
+
+#Train Null Model
+nm_train_null <- confusionMatrix(as.factor(nevermarry_train_null), nevermarry_train$NEVERMARRY, positive="1")
+nm_train_null
+
+#Test null model
+nm_test_null <- confusionMatrix(as.factor(nevermarry_test_null), nevermarry_test$NEVERMARRY, positive="1")
+nm_test_null
+
+#Start data frame with model results
+results <- data.frame(targetvar = character(),
+                      modeltype = character(),
+                      dataset = character(),
+                      accuracy = double(),
+                      sensitivity = double(),
+                      specificity = double(),
+                      F1 = double())
+
+captureresults <- function(var, type, traindata, testdata) {
+  
+    #Create variables
+    targetvar <- rep(var, 2)
+    modeltype <- rep(type, 2)
+    dataset <- c(strsplit(deparse(substitute(traindata)), '_')[[1]][2], strsplit(deparse(substitute(testdata)), '_')[[1]][2])
+    accuracy <- c(traindata[['overall']]["Accuracy"], testdata[['overall']]["Accuracy"])
+    sensitivity <- c(traindata[['byClass']]["Sensitivity"], testdata[['byClass']]["Sensitivity"])
+    specificity <- c(traindata[['byClass']]["Specificity"], testdata[['byClass']]["Specificity"])
+    F1 <- c(traindata[['byClass']]["F1"], testdata[['byClass']]["F1"])
+    
+  #Add rows to results data frame and return
+  results <- bind_rows(results, data.frame(targetvar, modeltype, dataset, accuracy, sensitivity, specificity, F1))
+  return(results)
+}
+  
+results <- captureresults('nevermarry', 'null', nm_train_null, nm_test_null)
+
+```
+
+The null model starts with a high-level of accuracy on the train data at 60.17% Since the null model predicts everyone is not married, the accuracy value is one minus the percentage of subjects that never married. As we expect with the null model, the sensitivity is 0 because the model does not predict that anyone never married. On the other hand, the specificity, or the percentage of predicted Nos that are actually Nos is 100% because the null model predicts everyone is married. The accuracy of the test model is higher than training because the test set has slightly fewer people that never married, proportionally.
+
+
+### ID Variables
+Since I was going to be modeling using the same method multiple times, I decided to write a function. I **finally** solved the atomic vector problem and understand how to reference a list of lists. This may be my proudest accomplishment of the course. I was very stumped when working on HW3. This issue was easier to understand after combining my R and Python knowledge.
+
+[This stack overflow post](https://stackoverflow.com/questions/33845288/using-predict-glm-with-a-user-defined-function) was key to solving this problem. It shows all the ways glm works with strings. One of my biggest problems getting this to work was I kept spelling "positive" wrong. :)
+```{r model_id_vars}
+
+modelglm <- function (target, vars, train_df, test_df, new_model_name) {
+     
+  #Clean data without NA
+    train_clean <- train_df %>% 
+      select(unlist(strsplit(vars, split = ' \\+ ')), all_of(target)) %>% 
+      na.omit
+    
+    test_clean <- test_df %>% 
+      select(unlist(strsplit(vars, split = ' \\+ ')), all_of(target)) %>% 
+      na.omit
+
+  #Model training data
+    model <- glm(sprintf('%s ~ %s', target, vars), data = train_clean, family=binomial(link="logit"))
+    
+    #Fit results
+      fitvalues <- (model$fit > 0.5) * 1
+  
+    #Create and display confusion matrix
+      cm_train <- confusionMatrix(as.factor(fitvalues), train_clean[[target]], positive = '1')
+      print(cm_train)
+  
+  #Predict test data
+    pred <- predict(model, newdata = test_clean, type = 'response')
+    
+    #Fit predicted
+      predvalues <- (pred > 0.5) * 1
+    
+    #Create and display confusion matrix
+      cm_test <- confusionMatrix(as.factor(predvalues), test_clean[[target]], positive = '1')
+      print(cm_test)
+    
+  #Capture resulting stats
+      captureresults(tolower(target), new_model_name, cm_train, cm_test)
+  
+} 
+  
+results <- modelglm('NEVERMARRY', 'RACE + FEMALE', nevermarry_train, nevermarry_test, 'id')
+
+```
+
+The results show that the ID variables increase the model's accuracy. There is no a significant difference between the test and training results. the test data correctly predicts the subject's never married status 65.4% of the time. The sensitivity increases from the null model as this model will predict an individual never married. The test model correctly predicts never married status 41.7% of the time. The correct predictions for individuals that did get married decreased from the null model, as expected, but the specificity still remains relatively high at 81%.
+
+### Income Variables
+```{r marry_income_vars}
+results <- modelglm('NEVERMARRY', 'INCOME_1997 + INCOME_2008 + INCOME_2019', nevermarry_train, nevermarry_test, 'income')
+
+```
+
+The income variables have an accuracy that is higher than the id variables and about 10% higher than the null model. However, the  training model suffers on specificity. The specificity is lower because the model predicts an individual is not married when the actually are. This could be  due to low-income individuals that are married. Two-income households likely have a confounding effect on this model.
+
+### Family Variables
+```{r marry_family_vars}
+results <- modelglm('NEVERMARRY', 'HHSIZE_1998 + BOTHPARENTS_1997', nevermarry_train, nevermarry_test, 'family')
+
+```
+
+The family variables perform worse than the null model on the training set and just slightly better on the test set. For several models above the recognize that the test model is performing better than the training. this likely is due to the limited number of variables in these models. The model is underfit, allowing for this difference.
+
+### Health Variables
+Putting together this health model, I recognized that the function's weakness is all the variables have to be the the format "v1 + v2." This works for small models, but it is less helpful when the variable lists get really long. I will have to consider further shortcuts in the future.
+```{r marry_health_vars}
+results <- modelglm('NEVERMARRY',
+                    paste('HEALTH_1997 + HEALTH_2008 + HEALTH_2019 + WEIGHT_1997 + WEIGHT_2008 + WEIGHT_2019 + WEIGHTCHANGE_1997 + ',
+                    'WEIGHTCHANGE_2008 + WEIGHTCHANGE_1997 + WEIGHTPRECEP_1997 + WEIGHTPRECEP_2008 + HEIGHTIN_2008', sep = ''),
+                    nevermarry_train, nevermarry_test, 'health')
+
+```
+
+The health variables have slightly better accuracy than the  null model, but their sensitivity is much lower than the ID or income variables. This means the model is overpredicting  those that married. The predicted never married status is much lower than the actual subject's that never married.
+
+
+### Education Variables
+While running these models, I am watching the confusion table. I want to ensure that the number of observations without `NAs`doesn't drop too low. I set up the function to only use complete cases for the variables in the model. This means that each confusion matrix has a different number of observations. This preserve the most data to work with, but I must be careful with its statistical implications. None of my target variables rely on the overall number of observations, so I am not overly concerned.
+```{r marry_edu_vars}
+results <- modelglm('NEVERMARRY',
+                    'ASVAB + GRADESREPEAT + GRADESSKIP + HIGHGRADE + GED + HS + AA + BA + PROF + PHD + MA',
+                    nevermarry_train, nevermarry_test, 'edu')
+
+```
+
+I expected the education model to have a high accuracy, but that is not true. The models for ID variables and income higher accuracy and sensitivity score. This could be due to the confounding effects of the grades skipped and grades repeated variables. 
+
+
+### Work Variables
+When running this model, I realized I accidentally dropped weeks works as an adult in my data cleaning page, so I had to go back to fix that.
+```{r marry_work_vars}
+results <- modelglm('NEVERMARRY',
+                    'WKSWK_ADULT',
+                    nevermarry_train, nevermarry_test, 'work')
+
+```
+
+This model shows the weeks worked is not a good predictor of never married status. 
+
+
+### Marriage Variables
+I knew that modeling the marriage variables would be difficult because they are so interdependent. I had to model the cohabitation variables separately because they are not independent. Only people that live with a significant other before they get married have a `COHABAGE` value.
+```{r marry_marry_vars}
+results <- modelglm('NEVERMARRY',
+                    'COHAB_PREMARRY',
+                    nevermarry_train, nevermarry_test, 'cohab_premarry')
+
+results <- modelglm('NEVERMARRY',
+                    'COHABAGE',
+                    nevermarry_train, nevermarry_test, 'cohab_age')
+
+```
+
+Something weird is happening with the `COHABAGE` variable. The model predicts that everyone marries, so it has the same summary statistics  at the null model. This likely is due to lack of independence in the data.  This definitely warrants further investigation. Cohabitation age does a better job, but it still has low sensitivity. For the training data, the cohabitation age model only correctly predicts never married  when  the subject never married 10.4% of the time.
+
+
+### Full Model
+This model initially had an issue test data had the level poor for the  variable `HEALTH_1997`, but this level was not present in the training set. Therefore, I just filtered them poor level out to allow the model to run cleanly. I know from the EDA that a var small portion of the sample reports poor health.
+```{r marry_full_vars}
+varnames <- nlsy97 %>% 
+  select(-PUBID_1997, -BDAY, -MARRYAGE, -FAILMARRY, -NEVERMARRY) %>% 
+  names() %>% 
+  as.character()
+
+results <- modelglm('NEVERMARRY',
+                    paste(varnames, collapse = ' + '),
+                    nevermarry_train, nevermarry_test %>% filter(HEALTH_1997 != 'poor'), 'full')
+
+```
+
+The full model has the highest level of accuracy of all those tested so far. It correctly predicts on the training data 73.9% of the time. The full model continues to have low sensitivity. The training set only correctly predicts an individual never married when they actually never married 32.9% of the time. Interestingly, the data set goes from nearly 9,000 records to just 939 record that have complete data for all variables. I could drop the later weight and income variables and well as the grades skipped and repeated to increase this number.
+
+
+
+## Divorced
+Now let's look at the divorced target variable
+
+
+### Null Model
+Now that we have the data set up let's create the null model.
+```{r divorce_null}
+#Create null vectors
+divorce_train_null <- rep(0, nrow(divorce_train))
+divorce_test_null <- rep(0, nrow(divorce_test))
+
+#Train Null Model
+div_train_null <- confusionMatrix(as.factor(divorce_train_null), divorce_train$FAILMARRY, positive="1")
+div_train_null
+
+#Test null model
+div_test_null <- confusionMatrix(as.factor(divorce_test_null), divorce_test$FAILMARRY, positive="1")
+div_test_null
+
+results <- captureresults('failmarry', 'null', div_train_null, div_test_null)
+
+```
+
+The null model for the divorce data  is  similar to those  that never married. the  accuracy values equals one minus the percentage of people who got divorced in their first marriage. There are no predicted divorces, so sensitivity is 0. All subjects are predicted as not divorced, so the specificity, accuracy of predicted Nos to actual Nos, is 100%. Out of of coincidence, the null model for the divorce test data performs slightly better than the training data.
+
+
+The three models below for the ID variables, family characteristics, and income predict no divorces. I originally thought my function had an error. However, further investigation showed that the function worked fine. However, the lower prevalence of divorces and lack of predictor variables mean the models do not have  any values above  the 0.5 cut off point. Therefore, the three models perform like the null model. There accuracy only changes slightly due to the prevalence of NA values in the predictor variables. Further analysis could consider changing the cut off point. 
+### ID Variables
+```{r divorce_id_var}
+results <- modelglm('FAILMARRY', 'RACE + FEMALE', divorce_train, divorce_test, 'id')
+```
+
+
+### Income Variables
+```{r divoce_income_var}
+results <- modelglm('FAILMARRY', 'INCOME_1997 + INCOME_2008 + INCOME_2019', divorce_train, divorce_test, 'income')
+```
+
+
+### Family Variables
+```{r divorce_family_var}
+results <- modelglm('FAILMARRY', 'HHSIZE_1998 + BOTHPARENTS_1997', divorce_train, divorce_test, 'family')
+```
+
+
+### Health Variables
+```{r divorce_health_vars}
+results <- modelglm('FAILMARRY',
+                    paste('HEALTH_1997 + HEALTH_2008 + HEALTH_2019 + WEIGHT_1997 + WEIGHT_2008 + WEIGHT_2019 + WEIGHTCHANGE_1997 + ',
+                    'WEIGHTCHANGE_2008 + WEIGHTCHANGE_1997 + WEIGHTPRECEP_1997 + WEIGHTPRECEP_2008 + HEIGHTIN_2008', sep = ''),
+                    divorce_train, divorce_test, 'health')
+
+```
+
+The health model finally predict some divorces but the accuracy is barely better than the null model for training set. The test set performs worse than the null mode. Sensitivity on the test set is abysmal. It only correctly predict a divorce when the subject is divorced 0.9% of the time.
+
+### Education Variables
+```{r divorce_edu_vars}
+results <- modelglm('FAILMARRY',
+                    'ASVAB + GRADESREPEAT + GRADESSKIP + HIGHGRADE + GED + HS + AA + BA + PROF + PHD + MA',
+                    divorce_train, divorce_test, 'edu')
+
+```
+
+The education model performs the best so far with an accuracy of 71.8% on the training data. However, the training set has a sensitivity of 0 because it does not correctly predict any divorces. It is clear that  single subject models  are under fitting the data. A full model with all variables is likely to perform better.
+
+
+### Work Variables
+When running this model, I realized I accidentally dropped weeks works as and adult on my data cleaning page, so I had to go back to fix that.
+```{r divorce_work_vars}
+results <- modelglm('FAILMARRY',
+                    'WKSWK_ADULT',
+                    divorce_train, divorce_test, 'work')
+
+```
+
+The work model again predicts no divorces and performs like the null model with variations for `NA` values. 
+
+
+### Marriage Variables
+I knew that modeling the marriage variables would be difficult because they are so interdependent. I had to model the cohabitation variables separately because they are not independent. Only people that live with a significant other before they get married have a `COHABAGE` value.
+```{r divorce_marry_vars}
+results <- modelglm('FAILMARRY',
+                    'COHAB_PREMARRY',
+                    divorce_train, divorce_test, 'cohab_premarry')
+
+results <- modelglm('FAILMARRY',
+                    'COHABAGE',
+                    divorce_train, divorce_test, 'cohab_age')
+
+results <- modelglm('FAILMARRY',
+                    'COHABAGE + MARRYAGE',
+                    divorce_train, divorce_test, 'relat_age')
+
+```
+
+The models with the cohabitation and marriage age together perform the best all of them them with an accuracy of 73.3% on the test data. This is surprising given that many of the simpler models were not working as well. The relationship age model sees a significant jump in its sensitivity. The test model correctly predicts a divorce when a divorce exists 33.9% of the time.
+
+
+### Full Model
+```{r div_full vars}
+varnames2 <- nlsy97 %>% 
+  select(-PUBID_1997, -BDAY, -FAILMARRY, -NEVERMARRY) %>% 
+  names() %>% 
+  as.character()
+
+results <- modelglm('FAILMARRY',
+                    paste(varnames2, collapse = ' + '),
+                    divorce_train, divorce_test %>% filter(HEALTH_1997 != 'poor'), 'full')
+```
+
+The full model has the highest level of accuracy at 79% for the training data and 76% for the test data. The sensitivity also dramatically from the other options. The test model predicts a divorce  when a divorce actually exists 39.5% of the  time. The prediction of non-divorces as a proportion of actual non-divorces, or specificity, also remains relatively high at 83.9%. As with the marriage data, a lot of observations must be dropped to create a compete cases for the divorce full model. The training data goes from 3,766 observations to just 649 in the confusion matrix. This still is sizable for making conclusions, but it gives credence to the use of data imputation even with a data set of this size.
+
+
+
+## Results
+```{r show_results}
+#Never Married Model
+results %>% 
+  filter(targetvar == 'nevermarry') %>%
+  arrange(desc(accuracy))
+
+#Divorced Model
+results %>% 
+  filter(targetvar == 'failmarry') %>% 
+  arrange(desc(accuracy))
+
+```
+
+
+
+## Summary
+This was an interesting project that spoke to some of the real challenges with live data. I struggled with the data size and understanding the variables. Then, I spend a significant amount of time cleaning the data into a usable format. The EDA and model building reveal further issues with the data that required additional cleaning. The graphs did not show significant differences in the annual factor variables, but it was more visible looking at summary statistics. If I was going to redo this project, I probably would used married instead of never married as the target variable because the double negatives got confusing. While I stuck inside the R tools learned in this class this project taught me a lot about the NLSY97 data set, and I also used my skills to automate processes in new ways.
+
+There are several areas for further research. 
+
+  + **Weighting** - The original data includes weights for generalizing the data the US population. It would be
+  interesting to use the weights and coefficients to create estimates for a larger population.
+  
+  + **Imputation** - Due to the size of the data, I had the luxury to drop rows with missing data. However, this
+  created significant reductions in the data size for modeling. Could having access to the original invalid response
+  data lead to better data imputation and possible mean substitutions? 
+  
+  + **Variable Manipulation** - There are several other ways to split the data to check relationships. Is income
+  probabilistic with a lack of relationship success for those on the high end  of the spectrum? Is there an
+  interaction between gender and educational achievement?
+  
+  + **Causation** - The current data is weak because it cannot distinguish between when happens before a subject
+  marries and why happens after. Accessing data by age or at time of marriage could lead to further insights.
+  
+  
+  
+
+
